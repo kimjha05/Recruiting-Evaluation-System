@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>동아리 리크루팅 평가 시스템</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body class="bg-gray-50 text-gray-800 font-sans">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+    const SESSION_OPTIONS = ['기타', '베이스', '키보드', '보컬', '드럼', '해당없음'];
+    const SUPABASE_URL = 'https://tkubawwtsurkcssmfwfg.supabase.co';
+    const SUPABASE_ANON_KEY = 'sb_publishable_3eu-ttguFLkDsRbyyWnwYw_oNqRYXe4';
+    const supabaseReady = !SUPABASE_URL.includes('여기에_') && !SUPABASE_ANON_KEY.includes('여기에_');
+    const supabase = supabaseReady ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+
+    const DEFAULT_STATE = {
+      adminPassword: '1234',
+      candidates: [],
+      criteria: [
+        { id: 'c1', name: '세션 1 실력', type: 'rating', weight: 1 },
+        { id: 'c2', name: '세션 2 실력', type: 'rating', weight: 1 },
+        { id: 'c3', name: '인성 평가', type: 'rating', weight: 1 },
+        { id: 'c4', name: '가산점', type: 'bonus', weight: 1 }
+      ],
+      ratingOptions: [
+        { id: 'r1', label: '상', score: 50 },
+        { id: 'r2', label: '중', score: 30 },
+        { id: 'r3', label: '하', score: 10 }
+      ],
+      settings: { scoreBonus: 20 },
+      evaluations: []
+    };
+
+    function App() {
+      const [view, setView] = useState('home'); 
+      const [adminPassword, setAdminPassword] = useState(DEFAULT_STATE.adminPassword);
+      const [candidates, setCandidates] = useState(DEFAULT_STATE.candidates);
+      const [criteria, setCriteria] = useState(DEFAULT_STATE.criteria);
+      const [ratingOptions, setRatingOptions] = useState(DEFAULT_STATE.ratingOptions);
+      const [settings, setSettings] = useState(DEFAULT_STATE.settings);
+      const [evaluations, setEvaluations] = useState(DEFAULT_STATE.evaluations);
+      const [isLoaded, setIsLoaded] = useState(!supabaseReady);
+      const skipNextSave = useRef(false);
+      
+      const [currentInterviewer, setCurrentInterviewer] = useState(null);
+      const [selectedCandidate, setSelectedCandidate] = useState(null);
+      const [savedEvalData, setSavedEvalData] = useState(null);
+
+      const currentState = () => ({ adminPassword, candidates, criteria, ratingOptions, settings, evaluations });
+
+      useEffect(() => {
+        if (!supabase) return;
+        let mounted = true;
+        const loadState = async () => {
+          const { data, error } = await supabase.from('app_state').select('data').eq('id', 1).maybeSingle();
+          if (error) {
+            console.error(error);
+            alert('Supabase에서 데이터를 불러오지 못했습니다. 설정과 RLS 정책을 확인하세요.');
+          } else if (mounted && data && data.data) {
+            const saved = { ...DEFAULT_STATE, ...data.data };
+            setAdminPassword(saved.adminPassword);
+            setCandidates(saved.candidates || []);
+            setCriteria(saved.criteria || []);
+            setRatingOptions(saved.ratingOptions || []);
+            setSettings(saved.settings || DEFAULT_STATE.settings);
+            setEvaluations(saved.evaluations || []);
+            skipNextSave.current = true;
+          }
+          if (mounted) setIsLoaded(true);
+        };
+        loadState();
+
+        const channel = supabase.channel('app-state-sync')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'app_state', filter: 'id=eq.1' }, payload => {
+            const saved = { ...DEFAULT_STATE, ...((payload.new && payload.new.data) || {}) };
+            setAdminPassword(saved.adminPassword);
+            setCandidates(saved.candidates || []);
+            setCriteria(saved.criteria || []);
+            setRatingOptions(saved.ratingOptions || []);
+            setSettings(saved.settings || DEFAULT_STATE.settings);
+            setEvaluations(saved.evaluations || []);
+            skipNextSave.current = true;
+          }).subscribe();
+        return () => { mounted = false; supabase.removeChannel(channel); };
+      }, []);
+
+      useEffect(() => {
+        if (!supabase || !isLoaded) return;
+        if (skipNextSave.current) { skipNextSave.current = false; return; }
+        const saveState = async () => {
+          const { error } = await supabase.from('app_state').upsert({ id: 1, data: currentState() });
+          if (error) console.error('Supabase 저장 실패:', error);
+        };
+        saveState();
+      }, [isLoaded, adminPassword, candidates, criteria, ratingOptions, settings, evaluations]);
+
+      if (!isLoaded) return <div class="min-h-screen flex items-center justify-center font-bold">공유 데이터를 불러오는 중...</div>;
+
+      if (view === 'home') return (
+        <div class="min-h-screen flex items-center justify-center p-4">
+          <div class="bg-white p-8 rounded-xl shadow-lg max-w-md w-full text-center">
+            <h1 class="text-3xl font-bold mb-8 text-blue-600">동아리 리크루팅 평가</h1>
+            <button onClick={() => setView('evaluatorLogin')} class="w-full bg-blue-500 text-white p-4 rounded-lg mb-4 hover:bg-blue-600 font-bold text-lg shadow">면접관 로그인</button>
+            <button onClick={() => setView('adminLogin')} class="w-full bg-gray-800 text-white p-4 rounded-lg hover:bg-gray-900 font-bold text-lg shadow">관리자 대시보드</button>
+          </div>
+        </div>
+      );
+
+      if (view === 'evaluatorLogin') return <EvaluatorLogin onLogin={(info) => { setCurrentInterviewer(info); setView('evaluatorDashboard'); }} onBack={() => setView('home')} />;
+      
+      if (view === 'evaluatorDashboard') return <EvaluatorDashboard currentInterviewer={currentInterviewer} candidates={candidates} evaluations={evaluations} onStartEval={(candidate) => { setSelectedCandidate(candidate); setSavedEvalData(null); setView('evaluatorForm'); }} onViewEval={(candidate, data) => { setSelectedCandidate(candidate); setSavedEvalData(data); setView('evaluatorForm'); }} onLogout={() => { setCurrentInterviewer(null); setView('home'); }} />;
+      
+      if (view === 'evaluatorForm') return <EvaluatorForm candidate={selectedCandidate} criteria={criteria} ratingOptions={ratingOptions} currentInterviewer={currentInterviewer} savedData={savedEvalData} onSave={(data) => { setEvaluations(previous => [...previous, data]); alert('제출 완료!'); setView('evaluatorDashboard'); }} onBack={() => setView('evaluatorDashboard')} />;
+      
+      if (view === 'adminLogin') return (
+        <div class="min-h-screen flex items-center justify-center p-4">
+          <div class="bg-white p-6 rounded-xl shadow-lg text-center relative max-w-sm w-full">
+            <button onClick={() => setView('home')} class="absolute top-4 left-4 text-gray-400 hover:text-gray-600 font-bold">← 뒤로</button>
+            <h2 class="text-xl font-bold mb-4 mt-2">관리자 접속</h2>
+            <input type="password" id="adminPwd" class="border p-3 rounded w-full mb-4 bg-gray-50" placeholder="비밀번호 4자리" />
+            <button onClick={() => { if(document.getElementById('adminPwd').value === adminPassword) setView('adminDashboard'); else alert('비밀번호가 틀렸습니다.'); }} class="w-full bg-black text-white p-3 rounded-lg font-bold">접속하기</button>
+          </div>
+        </div>
+      );
+
+      if (view === 'adminDashboard') return <AdminDashboard adminPassword={adminPassword} setAdminPassword={setAdminPassword} evaluations={evaluations} setEvaluations={setEvaluations} settings={settings} setSettings={setSettings} criteria={criteria} setCriteria={setCriteria} ratingOptions={ratingOptions} setRatingOptions={setRatingOptions} candidates={candidates} setCandidates={setCandidates} onBack={() => setView('home')} />;
+    }
+
+    function EvaluatorLogin({ onLogin, onBack }) {
+      const [name, setName] = useState(''); const [pin, setPin] = useState('');
+      const handleSubmit = (e) => { e.preventDefault(); if(!name.trim() || pin.length !== 4) return alert('이름과 비밀번호(4자리)를 입력하세요.'); onLogin({ name: name.trim(), pin }); };
+      return (
+        <div class="min-h-screen flex items-center justify-center p-4">
+          <div class="bg-white p-8 rounded-xl shadow-lg max-w-sm w-full relative">
+            <button onClick={onBack} class="text-gray-500 mb-6 font-bold hover:text-black">← 홈으로</button>
+            <h2 class="text-2xl font-bold mb-6 text-center">면접관 로그인</h2>
+            <form onSubmit={handleSubmit}>
+              <input type="text" value={name} onChange={e => setName(e.target.value)} class="w-full border p-3 rounded mb-4 bg-gray-50" placeholder="이름 입력" />
+              <input type="password" maxLength="4" value={pin} onChange={e => setPin(e.target.value)} class="w-full border p-3 rounded mb-6 bg-gray-50" placeholder="비밀번호 4자리" />
+              <button type="submit" class="w-full bg-blue-600 text-white font-bold py-3 rounded-lg hover:bg-blue-700">로그인</button>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    function EvaluatorDashboard({ currentInterviewer, candidates, evaluations, onStartEval, onViewEval, onLogout }) {
+      return (
+        <div class="max-w-3xl mx-auto p-4 py-8">
+          <div class="flex justify-between items-center mb-6">
+            <h2 class="text-2xl font-bold">{currentInterviewer.name} 면접관님</h2>
+            <button onClick={onLogout} class="bg-gray-200 text-gray-800 px-4 py-2 rounded-lg font-bold hover:bg-gray-300">로그아웃</button>
+          </div>
+          <div class="bg-white p-6 rounded-xl shadow-lg">
+            <h3 class="font-bold text-lg mb-4 border-b pb-3">지원자 목록 (총 {candidates.length}명)</h3>
+            <div class="space-y-3">
+              {candidates.map(candidate => {
+                const savedEval = evaluations.find(e => e.interviewer === currentInterviewer.name && e.candidate === candidate.name);
+                return (
+                  <div key={candidate.name} class="flex justify-between items-center p-4 bg-gray-50 rounded-lg border border-gray-200">
+                    <div>
+                      <div class="font-bold text-lg mb-1">{candidate.name}</div>
+                      <div class="flex gap-2">
+                        <span class="bg-blue-100 text-blue-800 border border-blue-200 px-2 py-0.5 rounded text-xs font-bold">세션1: {candidate.s1}</span>
+                        <span class="bg-green-100 text-green-800 border border-green-200 px-2 py-0.5 rounded text-xs font-bold">세션2: {candidate.s2}</span>
+                      </div>
+                    </div>
+                    {savedEval ? (
+                      <button onClick={() => onViewEval(candidate, savedEval)} class="bg-gray-800 text-white px-4 py-2 rounded font-bold hover:bg-gray-900 shadow">평가 보기</button>
+                    ) : (
+                      <button onClick={() => onStartEval(candidate)} class="bg-blue-600 text-white px-4 py-2 rounded font-bold hover:bg-blue-700 shadow">평가하기</button>
+                    )}
+                  </div>
+                );
+              })}
+              {candidates.length === 0 && <p class="text-gray-500 text-center py-4">등록된 지원자가 없습니다.</p>}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function EvaluatorForm({ candidate, criteria, ratingOptions, currentInterviewer, savedData, onSave, onBack }) {
+      const isReadOnly = !!savedData; 
+      const [form, setForm] = useState(savedData || {
+        interviewer: currentInterviewer.name, candidate: candidate.name, scores: {}, comments: {}
+      });
+
+      const handleScore = (id, val) => { if(!isReadOnly) setForm(f => ({ ...f, scores: { ...f.scores, [id]: val } })); };
+      const handleComment = (id, val) => { if(!isReadOnly) setForm(f => ({ ...f, comments: { ...f.comments, [id]: val } })); };
+
+      return (
+        <div class="max-w-2xl mx-auto p-4 py-8">
+          <button onClick={onBack} class="mb-4 text-gray-500 font-bold hover:text-black">← 대시보드로 돌아가기</button>
+          <div class="bg-white p-6 rounded-xl shadow-lg border-t-8 border-blue-500">
+            <h2 class="text-2xl font-bold mb-6 border-b pb-3 flex justify-between items-center">
+              <span>{candidate.name} 지원자 평가</span>
+              {isReadOnly && <span class="bg-red-100 text-red-600 text-sm px-3 py-1 rounded-full font-bold">제출 완료</span>}
+            </h2>
+            
+            <form onSubmit={(e) => { e.preventDefault(); onSave(form); }}>
+              {criteria.map(crit => {
+                if(crit.type === 'rating') {
+                  return (
+                    <div key={crit.id} class="bg-gray-50 p-4 rounded-lg mb-4 border">
+                      <h3 class="font-bold mb-2 text-gray-800">{crit.name}</h3>
+                      <div class="flex flex-wrap gap-4 mb-2">
+                        {ratingOptions.map(opt => (
+                          <label key={opt.id} class={`flex items-center gap-1 ${isReadOnly ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'} select-none`}>
+                            <input type="radio" name={crit.id} value={opt.id} checked={form.scores[crit.id] === opt.id} onChange={() => handleScore(crit.id, opt.id)} required disabled={isReadOnly} class="w-4 h-4 text-blue-600" /> 
+                            <span class="font-bold">{opt.label}</span>
+                          </label>
+                        ))}
+                      </div>
+                      <textarea value={form.comments[crit.id] || ''} onChange={(e) => handleComment(crit.id, e.target.value)} disabled={isReadOnly} placeholder="주관적 평가 코멘트" class={`w-full border p-2 rounded text-sm h-16 mt-2 ${isReadOnly ? 'bg-gray-200 text-gray-700' : 'bg-white'}`}></textarea>
+                    </div>
+                  );
+                } else {
+                  return (
+                    <div key={crit.id} class="bg-blue-50 p-4 rounded-lg mb-6 border border-blue-100">
+                      <h3 class="font-bold mb-2 text-blue-800">{crit.name}</h3>
+                      <label class={`flex items-center gap-2 mb-2 select-none ${isReadOnly ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'}`}>
+                        <input type="checkbox" checked={!!form.scores[crit.id]} onChange={(e) => handleScore(crit.id, e.target.checked)} disabled={isReadOnly} class="w-5 h-5" /> 가산점 부여 (O)
+                      </label>
+                      {(form.scores[crit.id] || isReadOnly) && (
+                        <textarea value={form.comments[crit.id] || ''} onChange={(e) => handleComment(crit.id, e.target.value)} disabled={isReadOnly} placeholder="사유 (선택)" class={`w-full border p-2 rounded text-sm h-16 mt-2 ${isReadOnly ? 'bg-gray-200 text-gray-700' : 'bg-white'}`}></textarea>
+                      )}
+                    </div>
+                  );
+                }
+              })}
+              {!isReadOnly && <button type="submit" class="w-full bg-blue-600 text-white font-bold py-4 rounded-lg hover:bg-blue-700 text-lg shadow">평가 최종 제출하기</button>}
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    function CandidateCard({ stat, idx, criteria, ratingOptions, settings }) {
+      const [isExpanded, setIsExpanded] = useState(false);
+
+      return (
+        <div class="bg-white p-5 rounded-xl shadow-md border-t-4 border-blue-500">
+          <div class="flex justify-between items-start mb-4">
+            <div>
+              <h4 class="text-2xl font-bold mb-2"><span class="text-gray-400 mr-2">{idx + 1}위</span>{stat.name}</h4>
+              <div class="flex gap-2">
+                <span class="bg-blue-100 text-blue-800 border-blue-300 border px-2 py-1 rounded text-xs font-bold">세션1: {stat.s1}</span>
+                <span class="bg-green-100 text-green-800 border-green-300 border px-2 py-1 rounded text-xs font-bold">세션2: {stat.s2}</span>
+              </div>
+            </div>
+            <div class="text-right">
+              <div class="bg-blue-600 text-white px-4 py-2 rounded-lg font-black text-xl shadow">총 {stat.totalAvg.toFixed(1)}점</div>
+              <div class="text-xs text-gray-500 mt-1">({stat.evals.length}명 평가)</div>
+            </div>
+          </div>
+
+          {stat.evals.length > 0 && (
+            <div class="flex flex-wrap gap-2 mb-4 pb-4 border-b">
+              {criteria.map(c => (
+                <div key={c.id} class="bg-gray-100 px-3 py-1 rounded text-sm text-gray-700">
+                  <span>{c.name}: </span><span class="font-bold">{stat.criteriaAvgs[c.id].toFixed(1)}점</span>
+                </div>
+              ))}
+            </div>
+          )}
+          
+          <button 
+            onClick={() => setIsExpanded(!isExpanded)} 
+            class={`w-full py-2 rounded font-bold text-sm transition-colors ${isExpanded ? 'bg-gray-200 text-gray-700' : 'bg-blue-50 text-blue-600 border border-blue-200 hover:bg-blue-100'}`}>
+            {isExpanded ? '면접관 세부 평가 숨기기' : '면접관 세부 코멘트 열람하기'}
+          </button>
+
+          {isExpanded && (
+            <div class="space-y-3 mt-4">
+              {stat.evals.length === 0 ? <p class="text-gray-400 text-sm text-center">제출된 평가가 없습니다.</p> : stat.evals.map((ev, i) => (
+                <div key={i} class="bg-gray-50 p-4 rounded-lg border border-gray-200 text-sm">
+                  <div class="font-bold text-gray-800 border-b pb-2 mb-2">면접관: {ev.interviewer}</div>
+                  <div class="space-y-2 mt-2">
+                    {criteria.map(c => {
+                      if(c.type === 'rating') {
+                        const selectedOpt = ratingOptions.find(o => o.id === ev.scores[c.id]);
+                        const displayLabel = selectedOpt ? selectedOpt.label : '미응답(또는 삭제됨)';
+                        return (
+                          <p key={c.id}><strong>[{c.name}: <span class="text-blue-600">{displayLabel}</span>]</strong> {ev.comments[c.id]}</p>
+                        );
+                      } else if(ev.scores[c.id]) {
+                        return <p key={c.id} class="text-red-500 font-bold bg-red-50 p-2 rounded">[{c.name} 부여] {ev.comments[c.id]}</p>;
+                      }
+                      return null;
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function AdminDashboard({ adminPassword, setAdminPassword, evaluations, setEvaluations, settings, setSettings, criteria, setCriteria, ratingOptions, setRatingOptions, candidates, setCandidates, onBack }) {
+      const [newCandidate, setNewCandidate] = useState({ name: '', s1: '기타', s2: '해당없음' });
+      const [newCriteria, setNewCriteria] = useState({ name: '', type: 'rating' });
+      const [newRatingLabel, setNewRatingLabel] = useState('');
+      const [newRatingScore, setNewRatingScore] = useState('');
+      const [newPasswordInput, setNewPasswordInput] = useState('');
+      const [groupBy, setGroupBy] = useState('none'); 
+      const [sortBy, setSortBy] = useState('total');
+
+      const handleResetAll = () => {
+        if(window.confirm('경고: 모든 평가 데이터가 삭제됩니다.\n계속하시겠습니까?')) {
+          if(window.confirm('정말 삭제하시겠습니까? 복구할 수 없습니다.')) {
+            setCandidates([]);
+            setEvaluations([]);
+            alert('초기화되었습니다.');
+          }
+        }
+      };
+
+      const handleAddCandidate = () => {
+        if(newCandidate.name.trim() && !candidates.find(c => c.name === newCandidate.name.trim())) {
+          setCandidates([...candidates, { ...newCandidate, name: newCandidate.name.trim() }]);
+          setNewCandidate({ name: '', s1: '기타', s2: '해당없음' });
+        }
+      };
+
+      const handleAddRating = () => {
+        if(newRatingLabel.trim() && newRatingScore !== '') {
+          setRatingOptions([...ratingOptions, { id: 'r'+Date.now(), label: newRatingLabel.trim(), score: Number(newRatingScore) }]);
+          setNewRatingLabel(''); setNewRatingScore('');
+        }
+      };
+      
+      const handleChangePassword = () => {
+        if (newPasswordInput.length === 4 && /^\d+$/.test(newPasswordInput)) {
+          setAdminPassword(newPasswordInput);
+          setNewPasswordInput('');
+          alert('비밀번호가 성공적으로 변경되었습니다.');
+        } else {
+          alert('비밀번호는 숫자 4자리여야 합니다.');
+        }
+      };
+
+      const stats = candidates.map(c => {
+        const evals = evaluations.filter(e => e.candidate === c.name);
+        let criteriaAvgs = {};
+        let totalAvg = 0;
+        
+        if(evals.length > 0) {
+          criteria.forEach(crit => {
+            let sum = 0;
+            evals.forEach(ev => {
+              if (crit.type === 'rating') {
+                const opt = ratingOptions.find(o => o.id === ev.scores[crit.id]);
+                const score = opt ? opt.score : 0;
+                sum += score * crit.weight;
+              } else {
+                sum += (ev.scores[crit.id] ? settings.scoreBonus * crit.weight : 0);
+              }
+            });
+            criteriaAvgs[crit.id] = sum / evals.length;
+          });
+          totalAvg = Object.values(criteriaAvgs).reduce((a,b) => a+b, 0);
+        }
+        return { ...c, evals, criteriaAvgs, totalAvg };
+      });
+
+      stats.sort((a, b) => {
+        if(sortBy === 'total') return b.totalAvg - a.totalAvg;
+        return (b.criteriaAvgs[sortBy] || 0) - (a.criteriaAvgs[sortBy] || 0);
+      });
+
+      let grouped = {};
+      if(groupBy === 'none') { grouped['전체 지원자 목록'] = stats; } 
+      else { stats.forEach(s => { const key = groupBy === 's1' ? s.s1 : s.s2; if(!grouped[key]) grouped[key] = []; grouped[key].push(s); }); }
+
+      return (
+        <div class="max-w-6xl mx-auto p-4 py-8">
+          <div class="flex justify-between items-center mb-6">
+            <h2 class="text-3xl font-bold">관리자 대시보드</h2>
+            <button onClick={onBack} class="bg-gray-800 text-white px-4 py-2 rounded-lg font-bold hover:bg-gray-900 shadow">홈으로</button>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <div class="lg:col-span-4 space-y-6">
+              
+              <div class="bg-white p-6 rounded-xl shadow border-t-4 border-black">
+                <h3 class="font-bold text-lg mb-4">지원자 추가</h3>
+                <div class="space-y-2 mb-4">
+                  <input type="text" value={newCandidate.name} onChange={e => setNewCandidate({ ...newCandidate, name: e.target.value })} placeholder="이름 입력" class="border p-2 rounded w-full text-sm" />
+                  <div class="flex gap-2">
+                    <select value={newCandidate.s1} onChange={e => setNewCandidate({ ...newCandidate, s1: e.target.value })} class="border p-2 rounded w-full text-sm bg-blue-50 text-blue-800">
+                      {SESSION_OPTIONS.map(o => <option key={o} value={o}>세션1: {o}</option>)}
+                    </select>
+                    <select value={newCandidate.s2} onChange={e => setNewCandidate({ ...newCandidate, s2: e.target.value })} class="border p-2 rounded w-full text-sm bg-green-50 text-green-800">
+                      {SESSION_OPTIONS.map(o => <option key={o} value={o}>세션2: {o}</option>)}
+                    </select>
+                  </div>
+                  <button onClick={handleAddCandidate} class="w-full bg-black text-white p-2 rounded text-sm font-bold shadow">등록하기</button>
+                </div>
+                <div class="flex flex-wrap gap-2 pt-2 border-t">
+                  {candidates.map(c => (
+                    <span key={c.name} class="bg-gray-100 px-3 py-1 rounded-full flex items-center gap-1 text-xs border">
+                      {c.name} <button onClick={() => setCandidates(candidates.filter(x => x.name !== c.name))} class="text-red-500 font-bold ml-1">&times;</button>
+                    </span>
+                  ))}
+                  {candidates.length === 0 && <span class="text-gray-400 text-xs">등록된 지원자가 없습니다.</span>}
+                </div>
+              </div>
+
+              <div class="bg-white p-6 rounded-xl shadow">
+                <h3 class="font-bold text-lg mb-4">평가 척도 및 배점 설정</h3>
+                <div class="space-y-2 mb-4">
+                  {ratingOptions.map(opt => (
+                    <div key={opt.id} class="flex items-center gap-2 bg-gray-50 p-2 rounded border">
+                      <input type="text" value={opt.label} onChange={e => setRatingOptions(ratingOptions.map(x => x.id === opt.id ? {...x, label: e.target.value} : x))} class="w-20 border p-1 text-sm font-bold text-center" />
+                      <div class="flex items-center gap-1 flex-1">
+                        <span class="text-xs text-gray-500">배점:</span>
+                        <input type="number" value={opt.score} onChange={e => setRatingOptions(ratingOptions.map(x => x.id === opt.id ? {...x, score: Number(e.target.value)} : x))} class="w-16 border p-1 text-sm text-center" />
+                      </div>
+                      <button onClick={() => setRatingOptions(ratingOptions.filter(x => x.id !== opt.id))} class="text-red-500 font-bold px-1 hover:text-red-700">&times;</button>
+                    </div>
+                  ))}
+                </div>
+                <div class="flex gap-2 text-sm border-t pt-4">
+                  <input type="text" value={newRatingLabel} onChange={e => setNewRatingLabel(e.target.value)} placeholder="새 이름 (예: A)" class="w-20 border p-2 rounded" />
+                  <input type="number" value={newRatingScore} onChange={e => setNewRatingScore(e.target.value)} placeholder="배점" class="w-16 border p-2 rounded flex-1" />
+                  <button onClick={handleAddRating} class="bg-blue-600 text-white px-3 rounded font-bold">추가</button>
+                </div>
+              </div>
+
+              <div class="bg-white p-6 rounded-xl shadow">
+                <h3 class="font-bold text-lg mb-4">세부 평가 항목</h3>
+                
+                <div class="flex items-center justify-between bg-blue-50 p-3 rounded border mb-4 border-blue-200">
+                  <span class="font-bold text-sm text-blue-800">체크형(O) 선택 시 점수:</span>
+                  <input type="number" value={settings.scoreBonus} onChange={e => setSettings({...settings, scoreBonus: Number(e.target.value)})} class="w-16 border p-1 text-sm text-center font-bold text-blue-700" />
+                </div>
+
+                <div class="space-y-2 mb-4">
+                  {criteria.map(crit => (
+                    <div key={crit.id} class="flex items-center gap-2 bg-gray-50 p-2 rounded border">
+                      <input type="text" value={crit.name} onChange={e => setCriteria(criteria.map(x => x.id === crit.id ? {...x, name: e.target.value} : x))} class="flex-1 border p-1 text-sm font-bold" />
+                      <div class="flex items-center">
+                        <span class="text-xs text-gray-500 mr-1">가중치:</span>
+                        <input type="number" step="0.1" value={crit.weight} onChange={e => setCriteria(criteria.map(x => x.id === crit.id ? {...x, weight: Number(e.target.value)} : x))} class="w-12 border p-1 text-sm text-center bg-yellow-50" />
+                      </div>
+                      <button onClick={() => setCriteria(criteria.filter(x => x.id !== crit.id))} class="text-red-500 font-bold px-1 hover:text-red-700">&times;</button>
+                    </div>
+                  ))}
+                </div>
+                <div class="flex gap-2 text-sm border-t pt-4">
+                  <input type="text" value={newCriteria.name} onChange={e => setNewCriteria({...newCriteria, name: e.target.value})} placeholder="새 항목 이름" class="flex-1 border p-2 rounded" />
+                  <select value={newCriteria.type} onChange={e => setNewCriteria({...newCriteria, type: e.target.value})} class="border p-2 rounded bg-gray-50">
+                    <option value="rating">선택형(척도)</option>
+                    <option value="bonus">체크형(O/X)</option>
+                  </select>
+                  <button onClick={() => { if(newCriteria.name.trim()) { setCriteria([...criteria, { id: 'c'+Date.now(), name: newCriteria.name.trim(), type: newCriteria.type, weight: 1 }]); setNewCriteria({ name: '', type: 'rating' }); }}} class="bg-gray-800 text-white px-3 rounded font-bold">추가</button>
+                </div>
+              </div>
+
+              <div class="bg-white p-6 rounded-xl shadow border-t-4 border-gray-400">
+                <h3 class="font-bold text-lg mb-4">보안 설정</h3>
+                <div class="flex gap-2 items-center text-sm">
+                  <span class="font-bold text-gray-600">비밀번호 변경:</span>
+                  <input type="text" maxLength="4" placeholder="새 숫자 4자리" value={newPasswordInput} onChange={e => setNewPasswordInput(e.target.value)} class="border p-2 rounded w-28 text-center flex-1" />
+                  <button onClick={handleChangePassword} class="bg-gray-800 text-white px-3 py-2 rounded font-bold">변경</button>
+                </div>
+              </div>
+
+            </div>
+
+            <div class="lg:col-span-8 space-y-4">
+              <div class="bg-white p-4 rounded-xl shadow flex flex-wrap gap-4 items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <span class="font-bold text-gray-700">분류:</span>
+                  <select value={groupBy} onChange={e => setGroupBy(e.target.value)} class="border p-2 rounded font-bold bg-gray-50">
+                    <option value="none">전체 보기</option>
+                    <option value="s1">세션 1 기준 그룹</option>
+                    <option value="s2">세션 2 기준 그룹</option>
+                  </select>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="font-bold text-gray-700">순위 정렬:</span>
+                  <select value={sortBy} onChange={e => setSortBy(e.target.value)} class="border p-2 rounded font-bold bg-gray-50 text-blue-700">
+                    <option value="total">총점 기준 내림차순</option>
+                    <optgroup label="개별 항목 기준">
+                      {criteria.map(c => <option key={c.id} value={c.id}>{c.name} 점수순</option>)}
+                    </optgroup>
+                  </select>
+                </div>
+              </div>
+
+              {Object.entries(grouped).map(([groupName, groupStats]) => (
+                <div key={groupName} class="mb-8">
+                  <h3 class="text-xl font-bold mb-4 border-l-4 border-black pl-3">{groupName} ({groupStats.length}명)</h3>
+                  <div class="space-y-4">
+                    {groupStats.map((stat, idx) => (
+                      <CandidateCard key={stat.name} stat={stat} idx={idx} criteria={criteria} ratingOptions={ratingOptions} settings={settings} />
+                    ))}
+                    {groupStats.length === 0 && <p class="text-gray-500 text-sm pl-4">이 그룹에 해당하는 지원자가 없습니다.</p>}
+                  </div>
+                </div>
+              ))}
+
+              <div class="pt-12 pb-4 flex justify-end">
+                <button onClick={handleResetAll} class="bg-red-500 text-white px-4 py-2 rounded font-bold text-sm shadow hover:bg-red-600 transition-colors">
+                  데이터 전체 삭제
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
